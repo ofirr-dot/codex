@@ -1,0 +1,426 @@
+const TZ = 'Asia/Jerusalem';
+const SHEETS = {
+  settings: 'Settings',
+  holdings: 'Holdings',
+  banks: 'Bank Accounts',
+  savings: 'Child Savings',
+  realized: 'Realized Gains',
+  logs: 'Logs'
+};
+
+function setInitialScriptProperties() {
+  PropertiesService.getScriptProperties().setProperties({
+    API_SECRET: 'replace-with-the-same-secret-as-vercel',
+    SPREADSHEET_ID: 'replace-after-running-createPortfolioWorkbook',
+    TG_TOKEN: 'replace-telegram-bot-token',
+    TG_CHAT_ID: 'replace-telegram-chat-id',
+    IBKR_TOKEN: '',
+    IBKR_QUERY_ID: ''
+  }, true);
+}
+
+function createPortfolioWorkbook() {
+  const ss = SpreadsheetApp.create('Ofir Portfolio V2');
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('SPREADSHEET_ID', ss.getId());
+
+  const first = ss.getSheets()[0];
+  first.setName(SHEETS.settings);
+
+  setupSettingsSheet_(ss.getSheetByName(SHEETS.settings));
+  setupHoldingsSheet_(ss.insertSheet(SHEETS.holdings));
+  setupBanksSheet_(ss.insertSheet(SHEETS.banks));
+  setupSavingsSheet_(ss.insertSheet(SHEETS.savings));
+  setupRealizedSheet_(ss.insertSheet(SHEETS.realized));
+  setupLogsSheet_(ss.insertSheet(SHEETS.logs));
+
+  SpreadsheetApp.flush();
+  Logger.log('Created workbook: ' + ss.getUrl());
+  return ss.getUrl();
+}
+
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData.contents || '{}');
+    assertSecret_(payload.secret);
+
+    if (payload.action === 'getPortfolio') {
+      return json_(getPortfolioSnapshot_());
+    }
+
+    if (payload.action === 'sendTelegramSummary') {
+      sendTelegramSummary_();
+      return json_({ ok: true });
+    }
+
+    return json_({ error: 'Unknown action' });
+  } catch (err) {
+    log_('ERROR', err.toString());
+    return json_({ error: err.toString() });
+  }
+}
+
+function getPortfolioSnapshot_() {
+  const ss = getWorkbook_();
+  const usdIls = getUsdIls_();
+  const holdings = readHoldings_(ss, usdIls);
+  const banks = readBanks_(ss, usdIls);
+  const savings = readSavings_(ss);
+
+  const holdingsValueIls = sum_(holdings, 'valueIls');
+  const cashValueIls = holdings
+    .filter(function(item) { return item.assetType === 'מזומן' || item.symbol.indexOf('CASH') === 0; })
+    .reduce(function(sum, item) { return sum + item.valueIls; }, 0);
+  const banksValueIls = sum_(banks, 'valueIls');
+  const savingsValueIls = sum_(savings, 'total');
+  const totalReturnIls = sum_(holdings, 'returnIls');
+  const totalCost = sum_(holdings, 'costIls');
+  const totalValueIls = holdingsValueIls + banksValueIls + savingsValueIls;
+
+  return {
+    meta: {
+      updatedAt: Utilities.formatDate(new Date(), TZ, 'dd/MM/yyyy HH:mm'),
+      usdIls: usdIls,
+      source: 'apps-script'
+    },
+    holdings: holdings,
+    banks: banks,
+    savings: savings,
+    summary: {
+      totalValueIls: totalValueIls,
+      holdingsValueIls: holdingsValueIls,
+      cashValueIls: cashValueIls,
+      banksValueIls: banksValueIls,
+      savingsValueIls: savingsValueIls,
+      totalReturnIls: totalReturnIls,
+      totalReturnPct: totalCost > 0 ? totalReturnIls / totalCost : 0
+    },
+    allocation: buildAllocation_(holdings, banksValueIls, savingsValueIls, totalValueIls)
+  };
+}
+
+function readHoldings_(ss, usdIls) {
+  const sheet = ss.getSheetByName(SHEETS.holdings);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const rows = sheet.getRange(2, 1, lastRow - 1, 12).getValues();
+  return rows.map(function(row) {
+    const symbol = clean_(row[0]).toUpperCase();
+    if (!symbol) return null;
+
+    const name = clean_(row[1]);
+    const source = clean_(row[2]) || 'MANUAL';
+    const assetType = clean_(row[3]) || 'ETF';
+    const currency = clean_(row[4]) || 'USD';
+    const quantity = num_(row[5]);
+    const buyPrice = num_(row[6]);
+    const currentPrice = num_(row[7]);
+    const manualFx = num_(row[8]);
+    const fxRate = currency === 'ILS' ? 1 : (manualFx || usdIls);
+    const costIls = num_(row[9]) || quantity * buyPrice * fxRate;
+    const valueIls = num_(row[10]) || quantity * currentPrice * fxRate;
+    const returnIls = valueIls - costIls;
+    const returnPct = costIls > 0 ? returnIls / costIls : 0;
+
+    return {
+      symbol: symbol,
+      name: name,
+      source: source,
+      assetType: assetType,
+      currency: currency,
+      quantity: quantity,
+      buyPrice: buyPrice,
+      currentPrice: currentPrice,
+      costIls: costIls,
+      valueIls: valueIls,
+      returnIls: returnIls,
+      returnPct: returnPct
+    };
+  }).filter(Boolean);
+}
+
+function readBanks_(ss, usdIls) {
+  const sheet = ss.getSheetByName(SHEETS.banks);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const rows = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+  return rows.map(function(row) {
+    const institution = clean_(row[0]);
+    if (!institution) return null;
+
+    const accountType = clean_(row[1]);
+    const currency = clean_(row[2]) || 'ILS';
+    const balance = num_(row[3]);
+    const fxRate = num_(row[4]) || (currency === 'ILS' ? 1 : usdIls);
+    const valueIls = num_(row[5]) || balance * fxRate;
+
+    return {
+      institution: institution,
+      accountType: accountType,
+      currency: currency,
+      balance: balance,
+      fxRate: fxRate,
+      valueIls: valueIls
+    };
+  }).filter(Boolean);
+}
+
+function readSavings_(ss) {
+  const sheet = ss.getSheetByName(SHEETS.savings);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const rows = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+  return rows.map(function(row) {
+    const childName = clean_(row[0]);
+    if (!childName) return null;
+
+    const updatedAt = row[3] instanceof Date
+      ? Utilities.formatDate(row[3], TZ, 'dd/MM/yyyy')
+      : clean_(row[3]);
+    const bituachLeumi = num_(row[4]);
+    const parents = num_(row[5]);
+    const total = num_(row[6]) || bituachLeumi + parents;
+
+    return {
+      childName: childName,
+      fund: clean_(row[1]),
+      track: clean_(row[2]),
+      updatedAt: updatedAt,
+      bituachLeumi: bituachLeumi,
+      parents: parents,
+      total: total
+    };
+  }).filter(Boolean);
+}
+
+function sendTelegramSummary_() {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('TG_TOKEN');
+  const chatId = props.getProperty('TG_CHAT_ID');
+  if (!token || !chatId || token.indexOf('replace-') === 0) {
+    throw new Error('Telegram is not configured');
+  }
+
+  const data = getPortfolioSnapshot_();
+  const msg = [
+    '<b>סיכום תיק השקעות</b>',
+    'עודכן: ' + escapeHtml_(data.meta.updatedAt),
+    'USD/ILS: ' + data.meta.usdIls.toFixed(4),
+    '',
+    '<b>שווי כולל:</b> ₪' + fmt_(data.summary.totalValueIls),
+    '<b>אחזקות:</b> ₪' + fmt_(data.summary.holdingsValueIls),
+    '<b>בנקים:</b> ₪' + fmt_(data.summary.banksValueIls),
+    '<b>חיסכון לילדים:</b> ₪' + fmt_(data.summary.savingsValueIls),
+    '<b>תשואה:</b> ₪' + fmt_(data.summary.totalReturnIls) + ' (' + (data.summary.totalReturnPct * 100).toFixed(1) + '%)'
+  ].join('\n');
+
+  UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      chat_id: chatId,
+      text: msg,
+      parse_mode: 'HTML'
+    }),
+    muteHttpExceptions: true
+  });
+}
+
+function buildAllocation_(holdings, banksValueIls, savingsValueIls, totalValueIls) {
+  const bySource = {};
+  holdings.forEach(function(item) {
+    const label = item.source + ' / ' + item.assetType;
+    bySource[label] = (bySource[label] || 0) + item.valueIls;
+  });
+
+  const colors = ['#3b6fe8', '#0caf60', '#00b8d9', '#7c5cfc', '#f5a623', '#e8394a'];
+  const items = Object.keys(bySource).map(function(label, index) {
+    return {
+      label: label,
+      valueIls: bySource[label],
+      pct: totalValueIls > 0 ? bySource[label] / totalValueIls : 0,
+      color: colors[index % colors.length]
+    };
+  });
+
+  if (banksValueIls > 0) {
+    items.push({
+      label: 'בנקים',
+      valueIls: banksValueIls,
+      pct: totalValueIls > 0 ? banksValueIls / totalValueIls : 0,
+      color: '#7c5cfc'
+    });
+  }
+
+  if (savingsValueIls > 0) {
+    items.push({
+      label: 'חיסכון לילדים',
+      valueIls: savingsValueIls,
+      pct: totalValueIls > 0 ? savingsValueIls / totalValueIls : 0,
+      color: '#f5a623'
+    });
+  }
+
+  return items;
+}
+
+function getUsdIls_() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get('USD_ILS');
+  if (cached) return Number(cached);
+
+  try {
+    const res = UrlFetchApp.fetch('https://api.frankfurter.app/latest?from=USD&to=ILS', {
+      muteHttpExceptions: true
+    });
+    const data = JSON.parse(res.getContentText());
+    if (data && data.rates && data.rates.ILS) {
+      cache.put('USD_ILS', String(data.rates.ILS), 60 * 60);
+      return Number(data.rates.ILS);
+    }
+  } catch (err) {
+    log_('WARN', 'USD/ILS fallback: ' + err);
+  }
+
+  const ss = getWorkbook_();
+  const fallback = num_(ss.getSheetByName(SHEETS.settings).getRange('B2').getValue());
+  return fallback || 3.7;
+}
+
+function setupSettingsSheet_(sheet) {
+  sheet.clear();
+  sheet.getRange('A1:B7').setValues([
+    ['Key', 'Value'],
+    ['USD_ILS_FALLBACK', 3.7],
+    ['ALERT_DOWN_PCT', 0.03],
+    ['ALERT_UP_PCT', 0.05],
+    ['NOTES', 'Tokens live in Script Properties, not here'],
+    ['LAST_IBKR_REFRESH', ''],
+    ['LAST_TELEGRAM_SENT', '']
+  ]);
+  styleHeader_(sheet, 1, 2);
+  sheet.autoResizeColumns(1, 2);
+}
+
+function setupHoldingsSheet_(sheet) {
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 12).setValues([[
+    'Symbol', 'Name', 'Source', 'Asset Type', 'Currency', 'Quantity',
+    'Buy Price', 'Current Price', 'FX Rate Override', 'Cost ILS Override',
+    'Value ILS Override', 'Notes'
+  ]]);
+  sheet.getRange(2, 1, 3, 12).setValues([
+    ['VOO', 'Vanguard S&P 500 ETF', 'IBKR', 'ETF', 'USD', 10, 430, 492, '', '', '', 'example'],
+    ['FAIR-CASH', 'FAIR מזומן', 'FAIR', 'מזומן', 'ILS', 1, 1, 1, '', 8000, 8000, 'example'],
+    ['', '', '', '', '', '', '', '', '', '', '', '']
+  ]);
+  styleHeader_(sheet, 1, 12);
+  sheet.autoResizeColumns(1, 12);
+}
+
+function setupBanksSheet_(sheet) {
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 6).setValues([[
+    'Institution', 'Account Type', 'Currency', 'Balance', 'FX Rate', 'Value ILS Override'
+  ]]);
+  sheet.getRange(2, 1, 2, 6).setValues([
+    ['בנק לאומי', 'עו"ש', 'ILS', 25000, 1, ''],
+    ['בנק לאומי', 'פיקדון', 'ILS', 40000, 1, '']
+  ]);
+  styleHeader_(sheet, 1, 6);
+  sheet.autoResizeColumns(1, 6);
+}
+
+function setupSavingsSheet_(sheet) {
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 7).setValues([[
+    'Child Name', 'Fund', 'Track', 'Updated At', 'Bituach Leumi', 'Parents', 'Total Override'
+  ]]);
+  sheet.getRange(2, 1, 1, 7).setValues([
+    ['ילד 1', 'קופת גמל', 'מניות', new Date(), 8700, 8700, '']
+  ]);
+  styleHeader_(sheet, 1, 7);
+  sheet.autoResizeColumns(1, 7);
+}
+
+function setupRealizedSheet_(sheet) {
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 8).setValues([[
+    'Period', 'Symbol', 'Description', 'Sale Date', 'Cost USD', 'Proceeds USD', 'USD/ILS', 'Notes'
+  ]]);
+  styleHeader_(sheet, 1, 8);
+  sheet.autoResizeColumns(1, 8);
+}
+
+function setupLogsSheet_(sheet) {
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 4).setValues([['Time', 'Level', 'Message', 'Context']]);
+  styleHeader_(sheet, 1, 4);
+  sheet.autoResizeColumns(1, 4);
+}
+
+function styleHeader_(sheet, row, columns) {
+  sheet.getRange(row, 1, 1, columns)
+    .setFontWeight('bold')
+    .setFontColor('#ffffff')
+    .setBackground('#2e3a50');
+  sheet.setFrozenRows(1);
+}
+
+function getWorkbook_() {
+  const id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  if (!id || id.indexOf('replace-') === 0) {
+    return SpreadsheetApp.getActiveSpreadsheet();
+  }
+  return SpreadsheetApp.openById(id);
+}
+
+function assertSecret_(secret) {
+  const expected = PropertiesService.getScriptProperties().getProperty('API_SECRET');
+  if (!expected || expected.indexOf('replace-') === 0) throw new Error('API_SECRET is not configured');
+  if (secret !== expected) throw new Error('Unauthorized');
+}
+
+function json_(data) {
+  return ContentService
+    .createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function log_(level, message) {
+  try {
+    const sheet = getWorkbook_().getSheetByName(SHEETS.logs);
+    if (sheet) sheet.appendRow([new Date(), level, message, '']);
+  } catch (err) {
+    Logger.log(level + ': ' + message);
+  }
+}
+
+function clean_(value) {
+  return String(value == null ? '' : value).trim();
+}
+
+function num_(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function sum_(items, key) {
+  return items.reduce(function(sum, item) { return sum + (Number(item[key]) || 0); }, 0);
+}
+
+function fmt_(value) {
+  return Math.round(Number(value) || 0).toLocaleString('en-US');
+}
+
+function escapeHtml_(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}

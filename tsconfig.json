@@ -1,0 +1,116 @@
+import type { PortfolioSnapshot } from "./types";
+
+const holdings = [
+  {
+    symbol: "VOO",
+    name: "Vanguard S&P 500 ETF",
+    source: "IBKR" as const,
+    assetType: "ETF",
+    currency: "USD",
+    quantity: 18,
+    buyPrice: 430,
+    currentPrice: 492,
+    costIls: 29106,
+    valueIls: 33199,
+    returnIls: 4093,
+    returnPct: 0.141
+  },
+  {
+    symbol: "QQQM",
+    name: "Nasdaq 100 ETF",
+    source: "IBKR" as const,
+    assetType: "ETF",
+    currency: "USD",
+    quantity: 25,
+    buyPrice: 172,
+    currentPrice: 204,
+    costIls: 16168,
+    valueIls: 19176,
+    returnIls: 3008,
+    returnPct: 0.186
+  },
+  {
+    symbol: "FAIR-CASH",
+    name: "FAIR מזומן",
+    source: "FAIR" as const,
+    assetType: "מזומן",
+    currency: "ILS",
+    quantity: 1,
+    buyPrice: 1,
+    currentPrice: 1,
+    costIls: 8200,
+    valueIls: 8200,
+    returnIls: 0,
+    returnPct: 0
+  }
+];
+
+const banks = [
+  {
+    institution: "בנק לאומי",
+    accountType: "עו\"ש",
+    currency: "ILS",
+    balance: 25000,
+    fxRate: 1,
+    valueIls: 25000
+  },
+  {
+    institution: "בנק לאומי",
+    accountType: "פיקדון",
+    currency: "ILS",
+    balance: 40000,
+    fxRate: 1,
+    valueIls: 40000
+  }
+];
+
+const savings = [
+  {
+    childName: "ילד 1",
+    fund: "קופת גמל",
+    track: "מניות",
+    updatedAt: "10/06/2026",
+    bituachLeumi: 8700,
+    parents: 8700,
+    total: 17400
+  }
+];
+
+export function getDemoPortfolio(): PortfolioSnapshot {
+  const holdingsValueIls = holdings.reduce((sum, item) => sum + item.valueIls, 0);
+  const banksValueIls = banks.reduce((sum, item) => sum + item.valueIls, 0);
+  const savingsValueIls = savings.reduce((sum, item) => sum + item.total, 0);
+  const totalReturnIls = holdings.reduce((sum, item) => sum + item.returnIls, 0);
+  const totalCost = holdings.reduce((sum, item) => sum + item.costIls, 0);
+  const totalValueIls = holdingsValueIls + banksValueIls + savingsValueIls;
+  const allocationBase = [
+    { label: "IBKR / ניירות ערך", valueIls: 52375, color: "#3b6fe8" },
+    { label: "FAIR / מזומן", valueIls: 8200, color: "#0caf60" },
+    { label: "בנקים", valueIls: banksValueIls, color: "#7c5cfc" },
+    { label: "חיסכון לכל ילד", valueIls: savingsValueIls, color: "#f5a623" }
+  ];
+
+  return {
+    meta: {
+      updatedAt: new Date().toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" }),
+      usdIls: 3.76,
+      source: "demo"
+    },
+    holdings,
+    banks,
+    savings,
+    summary: {
+      totalValueIls,
+      holdingsValueIls,
+      cashValueIls: 8200,
+      banksValueIls,
+      savingsValueIls,
+      totalReturnIls,
+      totalReturnPct: totalCost > 0 ? totalReturnIls / totalCost : 0
+    },
+    allocation: allocationBase.map((item) => ({
+      ...item,
+      pct: totalValueIls > 0 ? item.valueIls / totalValueIls : 0
+    }))
+  };
+}

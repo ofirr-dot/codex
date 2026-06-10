@@ -1,0 +1,59 @@
+export type Holding = {
+  symbol: string;
+  name: string;
+  source: "IBKR" | "FAIR" | "MANUAL";
+  assetType: string;
+  currency: string;
+  quantity: number;
+  buyPrice: number;
+  currentPrice: number;
+  costIls: number;
+  valueIls: number;
+  returnIls: number;
+  returnPct: number;
+};
+
+export type BankAccount = {
+  institution: string;
+  accountType: string;
+  currency: string;
+  balance: number;
+  fxRate: number;
+  valueIls: number;
+};
+
+export type ChildSaving = {
+  childName: string;
+  fund: string;
+  track: string;
+  updatedAt: string;
+  bituachLeumi: number;
+  parents: number;
+  total: number;
+};
+
+export type PortfolioSnapshot = {
+  meta: {
+    updatedAt: string;
+    usdIls: number;
+    source: "demo" | "apps-script";
+  };
+  holdings: Holding[];
+  banks: BankAccount[];
+  savings: ChildSaving[];
+  summary: {
+    totalValueIls: number;
+    holdingsValueIls: number;
+    cashValueIls: number;
+    banksValueIls: number;
+    savingsValueIls: number;
+    totalReturnIls: number;
+    totalReturnPct: number;
+  };
+  allocation: Array<{
+    label: string;
+    valueIls: number;
+    pct: number;
+    color: string;
+  }>;
+};
